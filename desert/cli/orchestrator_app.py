@@ -91,6 +91,11 @@ class OrchestratorApp(App[None]):
 
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit", show=True),
+        # Textual disables its default ctrl+c → quit when stdin is a real TTY
+        # (so it doesn't shadow copy). Re-bind it explicitly and mark priority
+        # so the focused Input doesn't swallow the key. SIGINT from a broken
+        # terminal still exits via the runtime's own handler.
+        Binding("ctrl+c", "quit", "quit", show=False, priority=True),
         Binding("ctrl+l", "clear_session", "clear", show=True),
         Binding("pageup", "scroll_session('page_up')", "scroll", show=True),
         Binding("pagedown", "scroll_session('page_down')", "scroll", show=False),
