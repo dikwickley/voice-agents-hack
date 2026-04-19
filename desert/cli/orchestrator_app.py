@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import socket
@@ -17,6 +18,8 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
 from cli.voice import VoiceEngine, VoiceUnavailable, audio_stats, list_input_devices
+
+log = logging.getLogger(__name__)
 
 DEFAULT_BASE = "http://127.0.0.1:8000"
 
@@ -42,6 +45,7 @@ def _public_endpoint() -> str:
     except OSError:
         return ""
 
+
 # ── Banner (block-letter "DESERT"), shaded line-by-line for a gradient feel ──
 _BANNER = [
     " ██████   ██████   ██████   ██████   ██████   ████████",
@@ -60,6 +64,10 @@ _TIPS = [
     "[dim] 3. [#f0d890]/parallel 4[/] to fan out manually · [#f0d890]/cloud on[/] to force Gemini.[/]",
     "[dim] 4. [#f0d890]/voice[/] to dictate into the prompt · [#f0d890]ctrl+v[/] toggles recording.[/]",
 ]
+
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_SPINNER_INTERVAL = 0.08
+
 
 _HELP = [
     "[bold #e2e8f0]commands[/]",
@@ -113,7 +121,7 @@ class OrchestratorApp(App[None]):
     #frame {
         width: 100%;
         height: 100%;
-        padding: 1 2 0 2;
+        padding: 1 2 1 2;
     }
 
     #banner {
@@ -168,6 +176,14 @@ class OrchestratorApp(App[None]):
         color: $fg;
     }
 
+    #voice-banner {
+        height: 1;
+        padding: 0 1;
+        color: $muted;
+        background: $bg;
+        margin: 1 0 0 0;
+    }
+
     #status {
         height: 1;
         padding: 0 1;
@@ -199,6 +215,12 @@ class OrchestratorApp(App[None]):
         self._voice_mode = False
         self._voice_recording = False
         self._voice_engine: VoiceEngine | None = None
+        # Ephemeral one-line status for recording / transcribing. Animated
+        # via ``_voice_banner_timer`` which cycles through ``_SPINNER_FRAMES``.
+        self._voice_banner_text: str = ""
+        self._voice_banner_spin: bool = False
+        self._voice_banner_frame: int = 0
+        self._voice_banner_timer = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="frame"):
@@ -211,6 +233,7 @@ class OrchestratorApp(App[None]):
                 wrap=True,
                 auto_scroll=True,
             )
+            yield Static("", id="voice-banner", markup=True)
             with Horizontal(id="prompt-wrap"):
                 yield Static("❯", id="prompt-caret")
                 yield Input(
@@ -231,6 +254,7 @@ class OrchestratorApp(App[None]):
         self._refresh_status()
         self.set_interval(2.5, self._refresh_cluster_tick)
         self.set_interval(0.85, self._tick_job_poll)
+        self.query_one("#voice-banner", Static).display = False
         self.query_one("#prompt", Input).focus()
 
     def on_key(self, event: events.Key) -> None:
@@ -278,6 +302,55 @@ class OrchestratorApp(App[None]):
     def _log(self, line: str | Text = "") -> None:
         self.query_one("#session", RichLog).write(line)
 
+    # ── ephemeral voice banner (recording / transcribing) ─────────────────
+
+    def _set_voice_banner(self, text: str | None, *, spin: bool = False) -> None:
+        """Show, animate, or clear the one-line voice status banner above the
+        prompt.
+
+        ``text=None`` hides the banner entirely (collapsing its row, so the
+        prompt snaps back up). ``spin=True`` prefixes ``text`` with a braille
+        spinner frame that ticks at ``_SPINNER_INTERVAL``; otherwise the
+        prefix is a static orange ``●`` recording dot.
+        """
+        banner = self.query_one("#voice-banner", Static)
+        if text is None:
+            if self._voice_banner_timer is not None:
+                self._voice_banner_timer.stop()
+                self._voice_banner_timer = None
+            self._voice_banner_text = ""
+            self._voice_banner_spin = False
+            banner.display = False
+            banner.update("")
+            return
+        self._voice_banner_text = text
+        self._voice_banner_spin = spin
+        banner.display = True
+        self._render_voice_banner()
+        if spin and self._voice_banner_timer is None:
+            self._voice_banner_timer = self.set_interval(
+                _SPINNER_INTERVAL, self._tick_voice_banner
+            )
+        elif (not spin) and self._voice_banner_timer is not None:
+            self._voice_banner_timer.stop()
+            self._voice_banner_timer = None
+
+    def _render_voice_banner(self) -> None:
+        if not self._voice_banner_text:
+            return
+        if self._voice_banner_spin:
+            frame = _SPINNER_FRAMES[self._voice_banner_frame % len(_SPINNER_FRAMES)]
+            prefix = f"[#f2c977]{frame}[/]"
+        else:
+            prefix = "[#e88e5a]●[/]"
+        self.query_one("#voice-banner", Static).update(
+            f"{prefix} {self._voice_banner_text}"
+        )
+
+    def _tick_voice_banner(self) -> None:
+        self._voice_banner_frame = (self._voice_banner_frame + 1) % len(_SPINNER_FRAMES)
+        self._render_voice_banner()
+
     # ── periodic refreshes ────────────────────────────────────────────────
 
     def _refresh_cluster_tick(self) -> None:
@@ -313,13 +386,19 @@ class OrchestratorApp(App[None]):
             self._sub_snapshot[tid] = st
             wid = (s.get("worker_id") or "—")[:12]
             if st == "assigned":
-                self._log(f"  [#f4c977]●[/] [dim]agent {i}[/] [#f0d890]{wid}[/] [dim]picked up task[/]")
+                self._log(
+                    f"  [#f4c977]●[/] [dim]agent {i}[/] [#f0d890]{wid}[/] [dim]picked up task[/]"
+                )
             elif st == "done":
                 snippet = ((s.get("text") or "").strip()[:140]).replace("\n", " ")
                 suffix = "…" if s.get("text") and len(s["text"]) > 140 else ""
-                self._log(f"  [#7cc78a]✓[/] [dim]agent {i}[/] [#f0d890]{wid}[/] [dim]→[/] {snippet}{suffix}")
+                self._log(
+                    f"  [#7cc78a]✓[/] [dim]agent {i}[/] [#f0d890]{wid}[/] [dim]→[/] {snippet}{suffix}"
+                )
             elif st == "failed" or s.get("error"):
-                self._log(f"  [#f87171]✗[/] [dim]agent {i}[/] {s.get('error') or 'failed'}")
+                self._log(
+                    f"  [#f87171]✗[/] [dim]agent {i}[/] {s.get('error') or 'failed'}"
+                )
 
         st = job.get("status")
         done = sum(1 for x in subs if x.get("status") == "done")
@@ -411,7 +490,9 @@ class OrchestratorApp(App[None]):
         elif cmd in ("quit", "exit", "q"):
             self.action_quit()
         else:
-            self._log(f"[#f87171]unknown command[/] [dim]{raw}[/] — try [#f0d890]/help[/]")
+            self._log(
+                f"[#f87171]unknown command[/] [dim]{raw}[/] — try [#f0d890]/help[/]"
+            )
 
     def _cmd_workers(self) -> None:
         try:
@@ -428,7 +509,9 @@ class OrchestratorApp(App[None]):
             short = wid if len(wid) <= 28 else wid[:12] + "…" + wid[-12:]
             pid = (w.get("peer_id") or "")[:12]
             ago = w.get("last_seen_sec_ago")
-            self._log(f"  [#7cc78a]●[/] [#f0d890]{short}[/]  [dim]peer {pid}… · Δ{ago}s[/]")
+            self._log(
+                f"  [#7cc78a]●[/] [#f0d890]{short}[/]  [dim]peer {pid}… · Δ{ago}s[/]"
+            )
 
     def _cmd_parallel(self, args: list[str]) -> None:
         if not args:
@@ -447,7 +530,9 @@ class OrchestratorApp(App[None]):
             except ValueError:
                 self._log("[#f87171]parallel must be 1–32 or [#f0d890]auto[/][/]")
                 return
-        self._log(f"[dim]parallel →[/] [#e2e8f0]{'auto' if self._parallel is None else self._parallel}[/]")
+        self._log(
+            f"[dim]parallel →[/] [#e2e8f0]{'auto' if self._parallel is None else self._parallel}[/]"
+        )
         self._refresh_status()
 
     def _cmd_cloud(self, args: list[str]) -> None:
@@ -460,7 +545,9 @@ class OrchestratorApp(App[None]):
         else:
             self._log("[#f87171]usage:[/] /cloud on|off|toggle")
             return
-        self._log(f"[dim]gemini →[/] [#e2e8f0]{'on' if self._force_cloud else 'off'}[/]")
+        self._log(
+            f"[dim]gemini →[/] [#e2e8f0]{'on' if self._force_cloud else 'off'}[/]"
+        )
         self._refresh_status()
 
     # ── voice / dictation ─────────────────────────────────────────────────
@@ -491,7 +578,9 @@ class OrchestratorApp(App[None]):
             self._log("[#f87171]no input devices found[/]")
             return
         current = os.environ.get("DESERT_AUDIO_INPUT_DEVICE") or "system default"
-        self._log(f"[dim]audio input devices[/] [dim]· current override:[/] [#e2e8f0]{current}[/]")
+        self._log(
+            f"[dim]audio input devices[/] [dim]· current override:[/] [#e2e8f0]{current}[/]"
+        )
         for idx, name, ch in devices:
             self._log(f"  [#f0d890]{idx:>2}[/]  [#e2e8f0]{name}[/]  [dim]({ch}ch)[/]")
         self._log(
@@ -524,6 +613,7 @@ class OrchestratorApp(App[None]):
                 except Exception:
                     pass
                 self._voice_recording = False
+            self._set_voice_banner(None)
             self._log("[dim]voice →[/] [#e2e8f0]off[/]")
         self._refresh_status()
 
@@ -570,9 +660,10 @@ class OrchestratorApp(App[None]):
             return
         self._voice_recording = True
         dev = self._voice_engine.last_device_name or "default"
-        self._log(
-            f"[#e88e5a]●[/] [dim]recording from[/] [#e2e8f0]{dev}[/] "
-            f"[dim]· press[/] [#f0d890]ctrl+v[/] [dim]to stop[/]"
+        self._set_voice_banner(
+            f"[dim]recording from[/] [#e2e8f0]{dev}[/] "
+            f"[dim]· press[/] [#f0d890]ctrl+v[/] [dim]to stop[/]",
+            spin=False,
         )
         self._refresh_status()
 
@@ -582,28 +673,28 @@ class OrchestratorApp(App[None]):
             pcm = self._voice_engine.stop_recording()
         except Exception as e:
             self._voice_recording = False
+            self._set_voice_banner(None)
             self._refresh_status()
             self._log(f"[#f87171]voice stop failed:[/] {e}")
             return
         self._voice_recording = False
         stats = audio_stats(pcm)
-        peak_db = "-inf" if stats.peak_db == float("-inf") else f"{stats.peak_db:.1f}"
-        self._log(
-            f"[dim]captured[/] [#e2e8f0]{stats.duration_s:.1f}s[/] "
-            f"[dim]· peak[/] [#e2e8f0]{peak_db} dBFS[/] "
-            f"[dim]· rms[/] [#e2e8f0]{stats.rms_int16:.0f}[/]"
+        # Capture-level diagnostics (duration / peak / rms) go to the debug log
+        # only — they clutter the TUI for normal dictation. Silent-capture
+        # hints are still surfaced inline in ``_transcribe_async`` on failure.
+        log.debug(
+            "voice: captured %.1fs peak_db=%.1f rms=%.0f",
+            stats.duration_s,
+            stats.peak_db if stats.peak_db != float("-inf") else -120.0,
+            stats.rms_int16,
         )
-        if stats.looks_silent:
-            dev = self._voice_engine.last_device_name or "default"
-            self._log(
-                f"[#f4c977]⚠[/] [dim]buffer looks silent — check that[/] "
-                f"[#e2e8f0]{dev}[/] [dim]is the mic you're speaking into,[/]"
-            )
-            self._log(
-                "  [dim]run[/] [#f0d890]/voice devices[/] [dim]and set[/] "
-                "[#f0d890]DESERT_AUDIO_INPUT_DEVICE=<id>[/] [dim]in desert/.env if needed[/]"
-            )
-        self._log("[dim]transcribing…[/]")
+        dev = self._voice_engine.last_device_name or "default"
+        # Swap the static ● recording banner for an animated spinner on the
+        # same row; it stays visible until transcription completes/fails.
+        self._set_voice_banner(
+            f"[dim]transcribing from[/] [#e2e8f0]{dev}[/]",
+            spin=True,
+        )
         self._refresh_status()
         self.run_worker(self._transcribe_async(pcm, stats), exclusive=True)
 
@@ -612,18 +703,23 @@ class OrchestratorApp(App[None]):
         try:
             text = await asyncio.to_thread(self._voice_engine.transcribe, pcm)
         except VoiceUnavailable as e:
+            self._set_voice_banner(None)
             self._log(f"[#f87171]voice unavailable:[/] {e}")
             return
         except Exception as e:
+            self._set_voice_banner(None)
             self._log(f"[#f87171]transcribe failed:[/] {e}")
             return
+        self._set_voice_banner(None)
         if not text:
             if stats.looks_silent:
-                self._log("[dim]no speech detected (silent capture)[/]")
+                dev = self._voice_engine.last_device_name or "default"
+                self._log(
+                    f"[dim]no speech detected — is[/] [#e2e8f0]{dev}[/] "
+                    "[dim]the right mic? try[/] [#f0d890]/voice devices[/]"
+                )
             else:
-                raw = (self._voice_engine.last_raw_json or "").strip()
-                snippet = raw if len(raw) <= 160 else raw[:160] + "…"
-                self._log(f"[dim]no speech detected — cactus returned:[/] [#94a3b8]{snippet}[/]")
+                self._log("[dim]no speech detected[/]")
             return
         prompt = self.query_one("#prompt", Input)
         existing = prompt.value
@@ -631,7 +727,6 @@ class OrchestratorApp(App[None]):
         prompt.value = new_value
         prompt.cursor_position = len(new_value)
         prompt.focus()
-        self._log(f"[dim]→[/] [#e2e8f0]{text}[/]")
 
     # ── job submission ────────────────────────────────────────────────────
 
@@ -663,9 +758,7 @@ class OrchestratorApp(App[None]):
         self._sub_snapshot = {}
         self._last_status = "running"
         self._log("")
-        self._log(
-            f"[bold #8ed189]❯[/] [#e2e8f0]{challenge}[/]"
-        )
+        self._log(f"[bold #8ed189]❯[/] [#e2e8f0]{challenge}[/]")
         self._log(
             f"  [dim]job[/] [#f0d890]{jid}[/] [dim]· parallel[/] {par_label} [dim]· gemini[/] {cloud_label}"
         )
