@@ -1,0 +1,105 @@
+# syntax=docker/dockerfile:1
+#
+# Desert: worker or orchestrator (TUI). Joins the swarm via the bootstrap server
+# HTTP API (DESERT_BOOTSTRAP_URL → GET /v1/bootstrap).
+#
+# Build from repo root:
+#   docker build -f desert/docker/Dockerfile.desert -t desert:latest .
+#
+# Run desert-bootstrap first (see Dockerfile.bootstrap), then e.g. on a shared
+# Docker network named ``desert``:
+#
+#   docker run --rm -d --network desert --name bootstrap ... desert-bootstrap:latest
+#   docker run --rm -it --network desert -e DESERT_BOOTSTRAP_URL=http://bootstrap:8090 \
+#     -e DESERT_P2P_ANNOUNCE_ADDR=/dns4/bootstrap/tcp/4001 desert:latest
+#
+# Default platform matches the Cactus worker build (linux/arm64).
+
+FROM --platform=linux/arm64 python:3.12-slim-bookworm AS cactus-build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bash \
+        git \
+        cmake \
+        build-essential \
+        libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG CACTUS_GIT_REF=main
+WORKDIR /cactus
+RUN git clone --depth 1 --branch "${CACTUS_GIT_REF}" https://github.com/cactus-compute/cactus.git .
+
+ENV GIT_TERMINAL_PROMPT=0
+ENV CXXFLAGS="-include iomanip"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    bash -c 'set -e; \
+    if ! command -v python3.12 >/dev/null 2>&1; then \
+      ln -sf "$(command -v python3)" /usr/local/bin/python3.12; \
+    fi; \
+    source ./setup && cactus build --python && test -f cactus/build/libcactus.so'
+
+FROM --platform=linux/arm64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+
+# Default local model: Gemma 3 270M (baked via ensure_model below).
+ARG BAKE_LLM_MODEL_ID=google/gemma-3-270m-it
+ARG HF_TOKEN=
+
+# Cloud fallback: on by default (workers may call Gemini when local inference fails
+# or when the TUI forces cloud). Bake GEMINI_API_KEY for unattended containers.
+ARG GEMINI_API_KEY=
+ARG DESERT_GEMINI_MODEL=gemini-3-flash-preview
+ARG DESERT_CLOUD_FALLBACK=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        libgmp-dev \
+        ffmpeg \
+        libcurl4 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=cactus-build /cactus/python /cactus/python
+COPY --from=cactus-build /cactus/CACTUS_VERSION /cactus/CACTUS_VERSION
+COPY --from=cactus-build /cactus/models.json /cactus/models.json
+RUN mkdir -p /cactus/cactus/build
+COPY --from=cactus-build /cactus/cactus/build/libcactus.so /cactus/cactus/build/libcactus.so
+
+WORKDIR /app
+COPY desert/pyproject.toml desert/uv.lock desert/README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
+COPY desert/backend ./backend
+COPY desert/worker ./worker
+COPY desert/p2p ./p2p
+COPY desert/cli ./cli
+COPY desert/bootstrap_server ./bootstrap_server
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen
+
+RUN --mount=type=cache,target=/root/.cache/huggingface \
+    PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH=/cactus/python:/app \
+    HF_TOKEN="${HF_TOKEN}" \
+    python -c "from pathlib import Path; from src.downloads import ensure_model; mid='${BAKE_LLM_MODEL_ID}'; p = ensure_model(mid); assert (Path(p) / 'config.txt').is_file(), p"
+
+COPY desert/docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONPATH=/cactus/python:/app
+ENV DESERT_LLM_MODEL_ID=${BAKE_LLM_MODEL_ID}
+ENV DESERT_P2P_LISTEN_PORT=4001
+# Point at the bootstrap HTTP server (override per deployment).
+ENV DESERT_BOOTSTRAP_URL=http://127.0.0.1:8090
+ENV GEMINI_API_KEY=${GEMINI_API_KEY}
+ENV DESERT_GEMINI_MODEL=${DESERT_GEMINI_MODEL}
+# 1 = allow Gemini fallback after local Cactus (default).
+ENV DESERT_CLOUD_FALLBACK=${DESERT_CLOUD_FALLBACK}
+# Default to worker mode — most containers in a swarm are plain peers.
+ENV DESERT_MODE=worker
+
+EXPOSE 8000
+EXPOSE 4001
+
+ENTRYPOINT ["/entrypoint.sh"]

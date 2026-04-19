@@ -1,0 +1,12 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Desert: docker compose up (4 workers)",
+      "type": "shell",
+      "command": "docker compose -f desert/docker-compose.yml --env-file desert/.env.example up --build --scale worker=4",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+# Worker/orchestrator build context is repo root (..). Keep images small and avoid stale host builds.
+**/.git
+**/venv
+**/.venv
+**/__pycache__
+**/*.pyc
+cactus/**/build
+# LLM weights are fetched during `docker build` (see Dockerfile.worker) — do not send huge dirs in context.
+cactus/weights

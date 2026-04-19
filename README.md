@@ -31,7 +31,7 @@ Prizes per special track:
 - Step 2: `git clone https://github.com/cactus-compute/cactus`
 - Step 3: `cd cactus && source ./setup && cd ..` (re-run in new terminal)
 - Step 4: `cactus build --python`
-- Step 5: `cactus download google/functiongemma-270m-it --reconvert`
+- Step 5: Download weights (pick one): `cactus download google/gemma-3-270m-it --reconvert` (default for Desert Docker worker), `cactus download google/gemma-4-E2B-it --reconvert`, or `cactus download google/functiongemma-270m-it --reconvert`
 - Step 6: Get cactus key from the [cactus website](https://cactuscompute.com/dashboard/api-keys)
 - Sept 7: Run `cactus auth` and enter your token when prompted.
 - Step 8: `pip install google-genai` (if using cloud fallback) 
