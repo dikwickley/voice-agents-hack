@@ -4,15 +4,19 @@
 
 After a one-time setup (see [Prereqs](#prereqs-once)), three terminals from `desert/`:
 
+// # Terminal A — bootstrap (HTTP :8090, libp2p :4001)
 ```bash
-# Terminal A — bootstrap (HTTP :8090, libp2p :4001)
 uv run desert-bootstrap
+```
 
-# Terminal B — orchestrator TUI:  
+// Terminal B — orchestrator TUI:  
+// uv run python -c "from backend.orchestrator.main import run; run()"
+```bash
 uv run desert orchestrator
-# uv run python -c "from backend.orchestrator.main import run; run()"
+```
 
-# Terminal C — worker (joins the swarm, serves /desert/task/2.0.0)
+// Terminal C — worker (joins the swarm, serves /desert/task/2.0.0)
+```bash
 uv run desert worker
 ```
 
@@ -46,9 +50,18 @@ Three processes, one host: **bootstrap**, **worker(s)**, **orchestrator**. They 
    cactus download google/gemma-3-270m-it
    ```
 
-   The worker also needs an ASR model; it will be fetched automatically on first request (`openai/whisper-tiny`) into `desert/cactus/weights/`.
+   The worker also needs an ASR model; it will be fetched automatically on first request (`openai/whisper-base`) into `desert/cactus/weights/`.
 
-3. (Optional) Drop a `desert/.env` with keys you don't want on the command line:
+3. (Optional, voice only) PortAudio for mic capture used by the TUI's `/voice` dictation:
+
+   ```bash
+   brew install portaudio      # macOS
+   # Ubuntu/Debian: sudo apt install libportaudio2 portaudio19-dev
+   ```
+
+   `sounddevice` + `numpy` are already declared dependencies, but they need PortAudio at the OS level.
+
+4. (Optional) Drop a `desert/.env` with keys you don't want on the command line:
 
    ```ini
    GEMINI_API_KEY=...
@@ -111,6 +124,26 @@ curl -s http://127.0.0.1:8000/v1/jobs/$JID | python3 -m json.tool
 
 On the first job the worker blocks briefly while loading ASR + LLM weights; subsequent jobs are hot. `inference_source` is `local` for on-device Cactus output and `gemini` when the cloud fallback kicks in (set `force_cloud_fallback: true` in the request body to force it).
 
+## Voice dictation in the TUI
+
+The orchestrator TUI (`desert orchestrator`) can transcribe the microphone directly into the prompt. Two backends ship:
+
+- **Gemini** (default when `GEMINI_API_KEY` is set) — uploads the captured PCM as inline `audio/wav` to `gemini-2.5-flash` and asks for a verbatim transcript. Way more robust to laptop-mic levels than on-device Whisper; requires network.
+- **Cactus** (offline) — the same on-device Whisper/Parakeet pipeline the worker uses. Selected automatically when no API key is present, or explicitly via `DESERT_VOICE_BACKEND=cactus`.
+
+1. Type `/voice` to enable voice mode. The backend label (e.g. `gemini: gemini-2.5-flash`) is logged and `voice on` appears in the status bar.
+2. Press **Ctrl+V** to start recording; `● recording` lights up in the status bar.
+3. Press **Ctrl+V** again to stop — the captured PCM is transcribed and the result is inserted into the prompt. Press Enter to submit it as a challenge, or edit it first.
+4. `/voice off` (or `/voice toggle`) disables voice mode; Ctrl+V becomes a no-op and normal terminal paste shortcuts aren't shadowed.
+
+Tuning knobs:
+- `DESERT_VOICE_BACKEND` — force `gemini` or `cactus`. Unset → auto-select.
+- `DESERT_VOICE_GEMINI_MODEL` — override the Gemini audio model (default `gemini-2.5-flash`). Deliberately *not* coupled to `DESERT_GEMINI_MODEL`, because the LLM fallback model (`gemini-3-flash-preview`) tends to generate free-form text on short clips instead of transcribing.
+- `DESERT_ASR_MODEL` — when using the Cactus backend, swap the transcription model. Anything in the [Cactus supported transcription list](https://docs.cactuscompute.com/latest/#supported-transcription-model) works (`nvidia/parakeet-ctc-0.6b`, `openai/whisper-base`, etc.).
+- If Ctrl+V says `voice unavailable: PortAudio not available`, install PortAudio (see Prereqs step 3).
+- If it says `Cactus Python FFI not found`, run `cactus build --python` in `desert/cactus/`.
+- If Gemini transcripts look like short hallucinations ("Mmm", "Okay."), the buffer was effectively silent — the mic is probably not picking you up; run `/voice devices` and set `DESERT_AUDIO_INPUT_DEVICE` to the right id.
+
 ## Environment
 
 | Variable | Where | Default | Meaning |
@@ -122,7 +155,9 @@ On the first job the worker blocks briefly while loading ASR + LLM weights; subs
 | `BOOTSTRAP_INCLUDE_LOOPBACK` | bootstrap | unset | Include `127.0.0.1` / `::1` in `/v1/bootstrap`. **Leave unset**; see Troubleshooting |
 | `ORCH_HOST` / `ORCH_PORT` | orchestrator | `0.0.0.0:8000` | FastAPI bind |
 | `DESERT_LLM_MODEL_ID` | worker | `google/gemma-3-270m-it` | Cactus LLM id |
-| `DESERT_ASR_MODEL` | worker | `openai/whisper-tiny` | Cactus ASR id |
+| `DESERT_ASR_MODEL` | worker, orchestrator (`/voice` cactus backend) | `openai/whisper-base` | Cactus ASR id |
+| `DESERT_VOICE_BACKEND` | orchestrator (`/voice`) | `gemini` if `GEMINI_API_KEY` else `cactus` | Force `gemini` or `cactus` transcription backend |
+| `DESERT_VOICE_GEMINI_MODEL` | orchestrator (`/voice` gemini backend) | `gemini-2.5-flash` | Gemini audio model used for dictation |
 | `DESERT_LLM_WEIGHTS` | worker | unset | Override LLM weights dir (skip `ensure_model`) |
 | `DESERT_CLOUD_FALLBACK` | worker | `1` | Allow Gemini fallback after local |
 | `GEMINI_API_KEY` | worker | unset | Required for cloud fallback / `force_cloud_fallback` |

@@ -113,7 +113,7 @@ def _resolve_llm_weights() -> Path:
 
 
 def _asr_model_id() -> str:
-    return os.environ.get("DESERT_ASR_MODEL", "openai/whisper-tiny")
+    return os.environ.get("DESERT_ASR_MODEL", "openai/whisper-base")
 
 
 def summarize_outbound_messages(buf: list[dict[str, Any]]) -> tuple[str, str, str | None]:

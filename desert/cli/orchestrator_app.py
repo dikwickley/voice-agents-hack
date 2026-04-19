@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import socket
@@ -14,6 +15,8 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
+
+from cli.voice import VoiceEngine, VoiceUnavailable, audio_stats, list_input_devices
 
 DEFAULT_BASE = "http://127.0.0.1:8000"
 
@@ -55,6 +58,7 @@ _TIPS = [
     "[dim] 1. Describe a task; workers split it [italic]map → reduce[/] and answer together.[/]",
     "[dim] 2. Type [#f0d890]/help[/] for commands, or [#f0d890]/workers[/] to list connected nodes.[/]",
     "[dim] 3. [#f0d890]/parallel 4[/] to fan out manually · [#f0d890]/cloud on[/] to force Gemini.[/]",
+    "[dim] 4. [#f0d890]/voice[/] to dictate into the prompt · [#f0d890]ctrl+v[/] toggles recording.[/]",
 ]
 
 _HELP = [
@@ -63,6 +67,8 @@ _HELP = [
     "[#94a3b8]  /workers[/]                 list registered libp2p nodes",
     "[#94a3b8]  /parallel <N|auto>[/]       fan-out for the next job",
     "[#94a3b8]  /cloud on|off|toggle[/]     force Gemini on every sub-agent",
+    "[#94a3b8]  /voice on|off|toggle[/]     enable dictation (ctrl+v to start/stop)",
+    "[#94a3b8]  /voice devices[/]           list input devices (set DESERT_AUDIO_INPUT_DEVICE)",
     "[#94a3b8]  /clear[/]                   clear the session",
     "[#94a3b8]  /quit[/]                    exit",
     "",
@@ -86,6 +92,10 @@ class OrchestratorApp(App[None]):
         Binding("ctrl+end", "scroll_session('end')", "scroll", show=False),
         Binding("escape", "focus_prompt", "prompt", show=False),
         Binding("ctrl+r", "focus_prompt", "prompt", show=False),
+        # priority=True so the Input widget's built-in ctrl+v (paste) doesn't
+        # swallow it while voice mode is on. When voice mode is off we fall
+        # through to a no-op that also blocks paste, so we show a hint.
+        Binding("ctrl+v", "toggle_record", "voice", show=False, priority=True),
     ]
 
     CSS = """
@@ -186,6 +196,9 @@ class OrchestratorApp(App[None]):
         self._workers_online = 0
         self._last_status = "idle"
         self._sub_snapshot: dict[str, str] = {}
+        self._voice_mode = False
+        self._voice_recording = False
+        self._voice_engine: VoiceEngine | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="frame"):
@@ -206,8 +219,9 @@ class OrchestratorApp(App[None]):
                 )
             yield Static("", id="status")
             yield Static(
-                "[dim]enter[/] submit  ·  [dim]pgup/pgdn[/] scroll  ·  "
-                "[dim]ctrl+l[/] clear  ·  [dim]ctrl+q[/] quit",
+                "[dim]enter[/] submit  ·  [dim]ctrl+v[/] voice  ·  "
+                "[dim]pgup/pgdn[/] scroll  ·  [dim]ctrl+l[/] clear  ·  "
+                "[dim]ctrl+q[/] quit",
                 id="hint",
             )
 
@@ -251,9 +265,13 @@ class OrchestratorApp(App[None]):
                 f"[#e2e8f0]{self._workers_online}[/] nodes online",
                 f"parallel [#e2e8f0]{par}[/]",
                 cloud,
-                self._last_status,
             ]
         )
+        if self._voice_recording:
+            parts.append("[#e88e5a]● recording[/]")
+        elif self._voice_mode:
+            parts.append("[#8ed189]voice on[/]")
+        parts.append(self._last_status)
         sep = "   [dim]·[/]   "
         status.update(parts[0] + " " + sep.join(parts[1:]))
 
@@ -335,6 +353,11 @@ class OrchestratorApp(App[None]):
             self._client.close()
         except Exception:
             pass
+        if self._voice_engine is not None:
+            try:
+                self._voice_engine.close()
+            except Exception:
+                pass
         self.exit()
 
     def action_focus_prompt(self) -> None:
@@ -381,6 +404,8 @@ class OrchestratorApp(App[None]):
             self._cmd_parallel(args)
         elif cmd == "cloud":
             self._cmd_cloud(args)
+        elif cmd == "voice":
+            self._cmd_voice(args)
         elif cmd == "clear":
             self.action_clear_session()
         elif cmd in ("quit", "exit", "q"):
@@ -437,6 +462,176 @@ class OrchestratorApp(App[None]):
             return
         self._log(f"[dim]gemini →[/] [#e2e8f0]{'on' if self._force_cloud else 'off'}[/]")
         self._refresh_status()
+
+    # ── voice / dictation ─────────────────────────────────────────────────
+
+    def _cmd_voice(self, args: list[str]) -> None:
+        if args and args[0].lower() in ("devices", "device", "ls", "list"):
+            self._cmd_voice_devices()
+            return
+        want: bool | None = None
+        if not args or args[0].lower() == "toggle":
+            want = not self._voice_mode
+        elif args[0].lower() in ("on", "1", "true", "yes", "start"):
+            want = True
+        elif args[0].lower() in ("off", "0", "false", "no", "stop"):
+            want = False
+        else:
+            self._log("[#f87171]usage:[/] /voice on|off|toggle | /voice devices")
+            return
+        self._set_voice_mode(want)
+
+    def _cmd_voice_devices(self) -> None:
+        try:
+            devices = list_input_devices()
+        except VoiceUnavailable as e:
+            self._log(f"[#f87171]voice:[/] {e}")
+            return
+        if not devices:
+            self._log("[#f87171]no input devices found[/]")
+            return
+        current = os.environ.get("DESERT_AUDIO_INPUT_DEVICE") or "system default"
+        self._log(f"[dim]audio input devices[/] [dim]· current override:[/] [#e2e8f0]{current}[/]")
+        for idx, name, ch in devices:
+            self._log(f"  [#f0d890]{idx:>2}[/]  [#e2e8f0]{name}[/]  [dim]({ch}ch)[/]")
+        self._log(
+            "[dim]pick one with[/] "
+            "[#f0d890]DESERT_AUDIO_INPUT_DEVICE=<id|name>[/] "
+            "[dim]in desert/.env, then restart[/]"
+        )
+
+    def _set_voice_mode(self, on: bool) -> None:
+        if on and not self._voice_mode:
+            if self._voice_engine is None:
+                self._voice_engine = VoiceEngine()
+            self._voice_mode = True
+            self._log(
+                "[dim]voice →[/] [#e2e8f0]on[/]  "
+                f"[dim]· backend[/] [#e2e8f0]{self._voice_engine.backend_label}[/]  "
+                "[dim]· press[/] [#f0d890]ctrl+v[/] [dim]to start/stop dictation[/]"
+            )
+            if not self._voice_engine.is_loaded:
+                if self._voice_engine.backend == "gemini":
+                    self._log("[dim]warming up Gemini client…[/]")
+                else:
+                    self._log("[dim]loading ASR model (first time only)…[/]")
+                self.run_worker(self._voice_load_async(), exclusive=False)
+        elif (not on) and self._voice_mode:
+            self._voice_mode = False
+            if self._voice_recording and self._voice_engine is not None:
+                try:
+                    self._voice_engine.stop_recording()
+                except Exception:
+                    pass
+                self._voice_recording = False
+            self._log("[dim]voice →[/] [#e2e8f0]off[/]")
+        self._refresh_status()
+
+    async def _voice_load_async(self) -> None:
+        assert self._voice_engine is not None
+        try:
+            await asyncio.to_thread(self._voice_engine.load)
+        except VoiceUnavailable as e:
+            self._log(f"[#f87171]voice unavailable:[/] {e}")
+            self._voice_mode = False
+            self._refresh_status()
+            return
+        except Exception as e:
+            self._log(f"[#f87171]voice load failed:[/] {e}")
+            self._voice_mode = False
+            self._refresh_status()
+            return
+        self._log("[#8ed189]voice ready[/]")
+
+    def action_toggle_record(self) -> None:
+        """Ctrl+V: start/stop dictation. No-op outside voice mode."""
+        if not self._voice_mode or self._voice_engine is None:
+            self._log(
+                "[#94a3b8]voice mode is off — type [#f0d890]/voice[/] to enable dictation.[/]"
+            )
+            return
+        if self._voice_recording:
+            self._stop_recording_and_transcribe()
+        else:
+            self._start_recording()
+
+    def _start_recording(self) -> None:
+        assert self._voice_engine is not None
+        if not self._voice_engine.is_loaded:
+            self._log("[#94a3b8]voice model still loading — try again in a moment.[/]")
+            return
+        try:
+            self._voice_engine.start_recording()
+        except VoiceUnavailable as e:
+            self._log(f"[#f87171]voice:[/] {e}")
+            return
+        except Exception as e:
+            self._log(f"[#f87171]voice start failed:[/] {e}")
+            return
+        self._voice_recording = True
+        dev = self._voice_engine.last_device_name or "default"
+        self._log(
+            f"[#e88e5a]●[/] [dim]recording from[/] [#e2e8f0]{dev}[/] "
+            f"[dim]· press[/] [#f0d890]ctrl+v[/] [dim]to stop[/]"
+        )
+        self._refresh_status()
+
+    def _stop_recording_and_transcribe(self) -> None:
+        assert self._voice_engine is not None
+        try:
+            pcm = self._voice_engine.stop_recording()
+        except Exception as e:
+            self._voice_recording = False
+            self._refresh_status()
+            self._log(f"[#f87171]voice stop failed:[/] {e}")
+            return
+        self._voice_recording = False
+        stats = audio_stats(pcm)
+        peak_db = "-inf" if stats.peak_db == float("-inf") else f"{stats.peak_db:.1f}"
+        self._log(
+            f"[dim]captured[/] [#e2e8f0]{stats.duration_s:.1f}s[/] "
+            f"[dim]· peak[/] [#e2e8f0]{peak_db} dBFS[/] "
+            f"[dim]· rms[/] [#e2e8f0]{stats.rms_int16:.0f}[/]"
+        )
+        if stats.looks_silent:
+            dev = self._voice_engine.last_device_name or "default"
+            self._log(
+                f"[#f4c977]⚠[/] [dim]buffer looks silent — check that[/] "
+                f"[#e2e8f0]{dev}[/] [dim]is the mic you're speaking into,[/]"
+            )
+            self._log(
+                "  [dim]run[/] [#f0d890]/voice devices[/] [dim]and set[/] "
+                "[#f0d890]DESERT_AUDIO_INPUT_DEVICE=<id>[/] [dim]in desert/.env if needed[/]"
+            )
+        self._log("[dim]transcribing…[/]")
+        self._refresh_status()
+        self.run_worker(self._transcribe_async(pcm, stats), exclusive=True)
+
+    async def _transcribe_async(self, pcm: bytes, stats: Any) -> None:
+        assert self._voice_engine is not None
+        try:
+            text = await asyncio.to_thread(self._voice_engine.transcribe, pcm)
+        except VoiceUnavailable as e:
+            self._log(f"[#f87171]voice unavailable:[/] {e}")
+            return
+        except Exception as e:
+            self._log(f"[#f87171]transcribe failed:[/] {e}")
+            return
+        if not text:
+            if stats.looks_silent:
+                self._log("[dim]no speech detected (silent capture)[/]")
+            else:
+                raw = (self._voice_engine.last_raw_json or "").strip()
+                snippet = raw if len(raw) <= 160 else raw[:160] + "…"
+                self._log(f"[dim]no speech detected — cactus returned:[/] [#94a3b8]{snippet}[/]")
+            return
+        prompt = self.query_one("#prompt", Input)
+        existing = prompt.value
+        new_value = (existing.rstrip() + " " + text).lstrip() if existing else text
+        prompt.value = new_value
+        prompt.cursor_position = len(new_value)
+        prompt.focus()
+        self._log(f"[dim]→[/] [#e2e8f0]{text}[/]")
 
     # ── job submission ────────────────────────────────────────────────────
 
