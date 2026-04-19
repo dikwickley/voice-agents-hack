@@ -246,12 +246,12 @@ class OrchestratorApp(App[None]):
                     id="prompt",
                 )
             yield Static("", id="status")
-            yield Static(
-                "[dim]enter[/] submit  ·  [dim]ctrl+v[/] voice  ·  "
-                "[dim]pgup/pgdn[/] scroll  ·  [dim]ctrl+l[/] clear  ·  "
-                "[dim]ctrl+q[/] quit",
-                id="hint",
-            )
+            # yield Static(
+            #     "[dim]enter[/] submit  ·  [dim]ctrl+v[/] voice  ·  "
+            #     "[dim]pgup/pgdn[/] scroll  ·  [dim]ctrl+l[/] clear  ·  "
+            #     "[dim]ctrl+q[/] quit",
+            #     id="hint",
+            # )
 
     def on_mount(self) -> None:
         self.title = "Desert"
@@ -605,8 +605,11 @@ class OrchestratorApp(App[None]):
                 "[dim]· press[/] [#f0d890]ctrl+v[/] [dim]to start/stop dictation[/]"
             )
             if not self._voice_engine.is_loaded:
-                if self._voice_engine.backend == "gemini":
+                backend = self._voice_engine.backend
+                if backend == "gemini":
                     self._log("[dim]warming up Gemini client…[/]")
+                elif backend == "gemma4":
+                    self._log("[dim]loading Gemma 4 weights (first time only)…[/]")
                 else:
                     self._log("[dim]loading ASR model (first time only)…[/]")
                 self.run_worker(self._voice_load_async(), exclusive=False)

@@ -122,17 +122,21 @@ On the first job the worker blocks briefly while loading ASR + LLM weights; subs
 
 The orchestrator TUI (`desert orchestrator`) can transcribe the microphone directly into the prompt. Two backends ship:
 
-- **Gemini** (default when `GEMINI_API_KEY` is set) — uploads the captured PCM as inline `audio/wav` to `gemini-2.5-flash` and asks for a verbatim transcript. Way more robust to laptop-mic levels than on-device Whisper; requires network.
-- **Cactus** (offline) — the same on-device Whisper/Parakeet pipeline the worker uses. Selected automatically when no API key is present, or explicitly via `DESERT_VOICE_BACKEND=cactus`.
+- **Gemma 4** (default when `desert/cactus/weights/gemma-4-e2b-it/` exists) — runs the natively-multimodal `google/gemma-4-E2B-it` locally via Cactus. The 300M-parameter audio conformer feeds directly into the LLM, so we just ask "transcribe this" with the WAV attached and take the response. ~0.5–1s round-trip on Apple Silicon, fully offline. Download with `cd desert/cactus && cactus download google/gemma-4-E2B-it`.
+- **Gemini** — uploads the captured PCM as inline `audio/wav` to `gemini-2.5-flash`. Requires network + `GEMINI_API_KEY`; used automatically when Gemma 4 weights aren't present but a key is.
+- **Cactus** (Whisper/Parakeet) — the original on-device ASR pipeline. Lightweight fallback for hosts without the Gemma 4 weights and without an API key.
 
-1. Type `/voice` to enable voice mode. The backend label (e.g. `gemini: gemini-2.5-flash`) is logged and `voice on` appears in the status bar.
-2. Press **Ctrl+V** to start recording; `● recording` lights up in the status bar.
+1. Type `/voice` to enable voice mode. The backend label (e.g. `gemma4: google/gemma-4-E2B-it`) is logged and `voice on` appears in the status bar.
+2. Press **Ctrl+V** to start recording; a spinner lights up above the prompt.
 3. Press **Ctrl+V** again to stop — the captured PCM is transcribed and the result is inserted into the prompt. Press Enter to submit it as a challenge, or edit it first.
 4. `/voice off` (or `/voice toggle`) disables voice mode; Ctrl+V becomes a no-op and normal terminal paste shortcuts aren't shadowed.
 
 Tuning knobs:
 
-- `DESERT_VOICE_BACKEND` — force `gemini` or `cactus`. Unset → auto-select.
+- `DESERT_VOICE_BACKEND` — force `gemma4`, `gemini`, or `cactus`. Unset → auto-select (Gemma 4 → Gemini → Cactus).
+- `DESERT_GEMMA4_MODEL` — Cactus model id for Gemma 4 (default `google/gemma-4-E2B-it`). Only used to trigger an auto-download if the weights dir is missing.
+- `DESERT_GEMMA4_WEIGHTS` — explicit path to the Gemma 4 weights dir, bypassing the default `desert/cactus/weights/<slug>/` lookup.
+- `DESERT_GEMMA4_DIRNAME` — override just the `<slug>` part of the default path (e.g. to swap to the E4B variant).
 - `DESERT_VOICE_GEMINI_MODEL` — override the Gemini audio model (default `gemini-2.5-flash`). Deliberately *not* coupled to `DESERT_GEMINI_MODEL`, because the LLM fallback model (`gemini-3-flash-preview`) tends to generate free-form text on short clips instead of transcribing.
 - `DESERT_ASR_MODEL` — when using the Cactus backend, swap the transcription model. Anything in the [Cactus supported transcription list](https://docs.cactuscompute.com/latest/#supported-transcription-model) works (`nvidia/parakeet-ctc-0.6b`, `openai/whisper-base`, etc.).
 - If Ctrl+V says `voice unavailable: PortAudio not available`, install PortAudio (see Prereqs step 3).
@@ -152,7 +156,9 @@ Tuning knobs:
 | `ORCH_HOST` / `ORCH_PORT`                     | orchestrator                                   | `0.0.0.0:8000`                             | FastAPI bind                                                                         |
 | `DESERT_LLM_MODEL_ID`                         | worker                                         | `google/gemma-3-270m-it`                   | Cactus LLM id                                                                        |
 | `DESERT_ASR_MODEL`                            | worker, orchestrator (`/voice` cactus backend) | `openai/whisper-base`                      | Cactus ASR id                                                                        |
-| `DESERT_VOICE_BACKEND`                        | orchestrator (`/voice`)                        | `gemini` if `GEMINI_API_KEY` else `cactus` | Force `gemini` or `cactus` transcription backend                                     |
+| `DESERT_VOICE_BACKEND`                        | orchestrator (`/voice`)                        | `gemma4` if weights present · `gemini` if `GEMINI_API_KEY` · else `cactus` | Force `gemma4`, `gemini`, or `cactus` transcription backend                          |
+| `DESERT_GEMMA4_MODEL`                         | orchestrator (`/voice` gemma4 backend)         | `google/gemma-4-E2B-it`                    | Cactus model id used for Gemma 4 auto-download                                       |
+| `DESERT_GEMMA4_WEIGHTS`                       | orchestrator (`/voice` gemma4 backend)         | unset                                      | Explicit path to Gemma 4 weights dir                                                 |
 | `DESERT_VOICE_GEMINI_MODEL`                   | orchestrator (`/voice` gemini backend)         | `gemini-2.5-flash`                         | Gemini audio model used for dictation                                                |
 | `DESERT_LLM_WEIGHTS`                          | worker                                         | unset                                      | Override LLM weights dir (skip `ensure_model`)                                       |
 | `DESERT_CLOUD_FALLBACK`                       | worker                                         | `1`                                        | Allow Gemini fallback after local                                                    |

@@ -1,15 +1,20 @@
 """Voice dictation for the orchestrator TUI.
 
 Captures 16 kHz / mono / s16le PCM from the host microphone (PortAudio via
-``sounddevice``) and transcribes it into the prompt. Two backends are
+``sounddevice``) and transcribes it into the prompt. Three backends are
 supported and selected via ``DESERT_VOICE_BACKEND``:
 
-* ``gemini`` (default when ``GEMINI_API_KEY`` is set) — sends the captured
-  PCM as a WAV blob to ``google-genai`` and asks for a verbatim
-  transcription. Dramatically better on low-level laptop mics than the
-  on-device Whisper.
-* ``cactus`` — the original on-device Cactus/Whisper pipeline. No network,
-  but sensitive to input level and prone to hallucinations on quiet audio.
+* ``gemma4`` (default when the Gemma-4 weights are present on disk) — runs
+  the natively multimodal ``google/gemma-4-E2B-it`` via Cactus. Gemma 4's
+  audio conformer feeds directly into the transformer, so we just ask the
+  model to "transcribe this" with the WAV attached as ``messages[].audio``
+  and take the response back. Fully on-device, ~0.5s end-to-end on M-series
+  Macs once the model is warm.
+* ``gemini`` — uploads the captured PCM as a WAV blob to ``google-genai``
+  (``gemini-2.5-flash``) for transcription. Requires a network + API key
+  but is robust to poor mic levels when you don't have the local weights.
+* ``cactus`` — the original on-device Cactus/Whisper pipeline. Kept as a
+  lightweight fallback for hosts without the Gemma 4 weights.
 
 Heavy deps (cactus + sounddevice + google-genai) are imported lazily and
 surfaced as ``VoiceUnavailable`` with an actionable message, so the TUI
@@ -26,6 +31,7 @@ import os
 import re
 import struct
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,12 +63,42 @@ DTYPE = "int16"
 BYTES_PER_SAMPLE = 2
 
 
+BACKEND_GEMMA4 = "gemma4"
 BACKEND_GEMINI = "gemini"
 BACKEND_CACTUS = "cactus"
 
+_ALL_BACKENDS = (BACKEND_GEMMA4, BACKEND_GEMINI, BACKEND_CACTUS)
+
+# Where `cactus download google/gemma-4-E2B-it` lands by default. We match
+# Cactus' own lowercased-dirname convention so we can auto-detect without
+# another env var.
+_DEFAULT_GEMMA4_MODEL = "google/gemma-4-E2B-it"
+_DEFAULT_GEMMA4_DIRNAME = "gemma-4-e2b-it"
+
 
 class VoiceUnavailable(RuntimeError):
-    """sounddevice / PortAudio / Cactus / Gemini not usable on this host."""
+    """sounddevice / PortAudio / Cactus / Gemini / Gemma4 not usable on this host."""
+
+
+def _weights_root() -> Path:
+    """``desert/cactus/weights`` — the directory ``cactus download …`` writes to."""
+    return Path(__file__).resolve().parent.parent / "cactus" / "weights"
+
+
+def _gemma4_weights_path() -> Path | None:
+    """Resolve the on-disk Gemma 4 weights dir, or ``None`` if not present.
+
+    Honours ``DESERT_GEMMA4_WEIGHTS`` (explicit path) first, then falls back
+    to the default ``desert/cactus/weights/<slug>`` layout.
+    """
+    explicit = (os.environ.get("DESERT_GEMMA4_WEIGHTS") or "").strip()
+    if explicit:
+        p = Path(explicit)
+        return p if p.is_dir() else None
+    # Allow an override of just the slug, keeping the standard parent dir.
+    slug = (os.environ.get("DESERT_GEMMA4_DIRNAME") or _DEFAULT_GEMMA4_DIRNAME).strip()
+    candidate = _weights_root() / slug
+    return candidate if candidate.is_dir() else None
 
 
 def _resolve_backend(explicit: str | None) -> str:
@@ -70,13 +106,16 @@ def _resolve_backend(explicit: str | None) -> str:
 
     Precedence:
       1. explicit constructor arg (``VoiceEngine(backend=...)``)
-      2. ``DESERT_VOICE_BACKEND`` env (``gemini`` | ``cactus``)
-      3. ``gemini`` if ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` is set
-      4. ``cactus`` otherwise
+      2. ``DESERT_VOICE_BACKEND`` env (``gemma4`` | ``gemini`` | ``cactus``)
+      3. ``gemma4`` if the Gemma-4 weights are present on disk
+      4. ``gemini`` if ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` is set
+      5. ``cactus`` otherwise
     """
     pick = (explicit or os.environ.get("DESERT_VOICE_BACKEND") or "").strip().lower()
-    if pick in (BACKEND_GEMINI, BACKEND_CACTUS):
+    if pick in _ALL_BACKENDS:
         return pick
+    if _gemma4_weights_path() is not None:
+        return BACKEND_GEMMA4
     has_key = bool(
         (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
     )
@@ -139,6 +178,17 @@ _GEMINI_TRANSCRIBE_PROMPT = (
     "Return ONLY the transcript as plain text — no quotes, no labels, "
     "no commentary, no timestamps. "
     "If the clip contains no intelligible speech, return an empty string."
+)
+
+# Gemma 4 is chat-tuned, so the prompt also gently tells it to skip
+# pleasantries. Verified empirically: with this prompt, short utterances
+# land as the raw transcript (e.g. "Hello world this is a test") without
+# "Sure, here's the transcript:" preamble.
+_GEMMA4_TRANSCRIBE_PROMPT = (
+    "Transcribe the attached audio verbatim. "
+    "Respond with ONLY the spoken words, as plain text. "
+    "Do not add quotes, labels, commentary, timestamps, or speaker tags. "
+    "If the clip contains no intelligible speech, respond with an empty string."
 )
 
 
@@ -212,6 +262,7 @@ class VoiceEngine:
         *,
         backend: str | None = None,
         gemini_model: str | None = None,
+        gemma4_model: str | None = None,
     ) -> None:
         self.backend = _resolve_backend(backend)
         self.model_id = model_id or os.environ.get("DESERT_ASR_MODEL", "openai/whisper-base")
@@ -223,6 +274,14 @@ class VoiceEngine:
             or os.environ.get("DESERT_VOICE_GEMINI_MODEL")
             or "gemini-2.5-flash"
         )
+        self.gemma4_model = (
+            gemma4_model
+            or os.environ.get("DESERT_GEMMA4_MODEL")
+            or _DEFAULT_GEMMA4_MODEL
+        )
+        # ``_asr_handle`` doubles as the Cactus model handle for both the
+        # Whisper (``cactus`` backend) and Gemma-4 (``gemma4`` backend) cases
+        # — Cactus uses the same ``cactus_init`` entrypoint for both.
         self._asr_handle: int | None = None
         self._gemini_ready = False
         self._stream = None
@@ -234,7 +293,9 @@ class VoiceEngine:
 
     @property
     def backend_label(self) -> str:
-        """Human-readable tag for the TUI (e.g. ``gemini: gemini-2.5-flash``)."""
+        """Human-readable tag for the TUI (e.g. ``gemma4: google/gemma-4-E2B-it``)."""
+        if self.backend == BACKEND_GEMMA4:
+            return f"gemma4: {self.gemma4_model}"
         if self.backend == BACKEND_GEMINI:
             return f"gemini: {self.gemini_model}"
         return f"cactus: {self.model_id}"
@@ -258,19 +319,56 @@ class VoiceEngine:
         """Prepare the active backend. Idempotent; safe to call from a worker
         thread.
 
-        * Gemini: verifies ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` is set and
-          imports ``google-genai`` (fast, no network I/O).
-        * Cactus: downloads (if needed) and mmaps the ASR weights.
+        * ``gemma4``: mmaps the on-device ``google/gemma-4-E2B-it`` weights
+          (fetches via ``ensure_model`` if not already downloaded).
+        * ``gemini``: verifies ``GEMINI_API_KEY`` / ``GOOGLE_API_KEY`` is set
+          and imports ``google-genai`` (fast, no network I/O).
+        * ``cactus``: downloads (if needed) and mmaps the Whisper/Parakeet
+          ASR weights.
         """
         if self.is_loaded:
             return
         with self._load_lock:
             if self.is_loaded:
                 return
-            if self.backend == BACKEND_GEMINI:
+            if self.backend == BACKEND_GEMMA4:
+                self._load_gemma4()
+            elif self.backend == BACKEND_GEMINI:
                 self._load_gemini()
             else:
                 self._load_cactus()
+
+    def _load_gemma4(self) -> None:
+        try:
+            from src.cactus import cactus_init
+        except ImportError as e:
+            raise VoiceUnavailable(
+                "Cactus Python FFI not found. Run "
+                "`cactus build --python` in desert/cactus/, then retry."
+            ) from e
+
+        weights = _gemma4_weights_path()
+        if weights is None:
+            # Fall back to ``ensure_model`` so we can auto-download into the
+            # standard cache dir, matching how the worker bootstraps its LLM.
+            try:
+                from src.downloads import ensure_model
+            except ImportError as e:
+                raise VoiceUnavailable(
+                    "Cactus Python FFI not found. Run "
+                    "`cactus build --python` in desert/cactus/, then retry."
+                ) from e
+            try:
+                fetched = ensure_model(self.gemma4_model)
+            except Exception as e:
+                raise VoiceUnavailable(
+                    f"failed to fetch Gemma 4 weights {self.gemma4_model!r}: {e}. "
+                    "Try `cactus download google/gemma-4-E2B-it` in desert/cactus/."
+                ) from e
+            weights = Path(fetched)
+
+        log.info("voice: loading Gemma-4 from %s", weights)
+        self._asr_handle = cactus_init(str(weights), None, False)
 
     def _load_gemini(self) -> None:
         api_key = (
@@ -391,9 +489,91 @@ class VoiceEngine:
             self.load()
         if not pcm:
             return ""
+        if self.backend == BACKEND_GEMMA4:
+            return self._transcribe_gemma4(pcm)
         if self.backend == BACKEND_GEMINI:
             return self._transcribe_gemini(pcm)
         return self._transcribe_cactus(pcm)
+
+    def _transcribe_gemma4(self, pcm: bytes) -> str:
+        """Run the natively-multimodal Gemma 4 over the captured audio.
+
+        Gemma 4 is a chat-tuned LLM with a built-in audio conformer: the
+        recipe is ``cactus_complete(messages=[{role, content, audio:[wav]}])``
+        and the ``response`` field of the returned JSON is the verbatim
+        transcript (we prompt-engineer it to return *only* the transcript,
+        no "Here's what I heard:" preamble).
+
+        We pass the audio as a temporary WAV file referenced in
+        ``messages[].audio`` rather than via the ``pcm_buffer`` C arg — the
+        file-path path is ~20× faster on repeated calls because Cactus can
+        cache the audio prefill, and the WAV wrapper is trivial.
+        """
+        # Skip the round-trip entirely on obviously silent buffers — Gemma 4
+        # will otherwise invent pleasantries ("Hello?", "Uh-huh.") when it
+        # has nothing real to decode.
+        if audio_stats(pcm).looks_silent:
+            self.last_raw_json = json.dumps({"model": self.gemma4_model, "skipped": "silent"})
+            log.info("voice: skipping gemma4 call (silent buffer, %d bytes)", len(pcm))
+            return ""
+
+        try:
+            from src.cactus import cactus_complete
+        except ImportError as e:
+            raise VoiceUnavailable("Cactus Python FFI import failed") from e
+
+        # Write to a temp WAV and hand the path to Cactus; delete on the way
+        # out even if decode raises, so a long session doesn't leak temps.
+        fd, path_str = tempfile.mkstemp(prefix="desert-voice-", suffix=".wav")
+        os.close(fd)
+        wav_path = Path(path_str)
+        try:
+            wav_path.write_bytes(_pcm_to_wav(pcm))
+            messages = [
+                {
+                    "role": "user",
+                    "content": _GEMMA4_TRANSCRIBE_PROMPT,
+                    "audio": [str(wav_path)],
+                }
+            ]
+            options = json.dumps(
+                {
+                    # Dictation is short — cap tokens so a runaway generation
+                    # (model ignoring the "verbatim" instruction and soliloquy-
+                    # ing instead) can't lock up the UI for 30+ seconds.
+                    "max_tokens": 256,
+                    "temperature": 0.0,
+                    "auto_handoff": False,
+                    "telemetry_enabled": False,
+                }
+            )
+            try:
+                raw = cactus_complete(
+                    self._asr_handle, json.dumps(messages), options, None, None, None
+                )
+            except Exception as e:
+                self.last_raw_json = json.dumps({"error": str(e)})
+                raise VoiceUnavailable(f"gemma4 complete failed: {e}") from e
+        finally:
+            try:
+                wav_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        self.last_raw_json = raw
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise VoiceUnavailable(f"gemma4 returned non-JSON: {e}") from e
+        if not data.get("success", True):
+            raise VoiceUnavailable(f"gemma4 error: {data.get('error') or 'unknown'}")
+        text = (data.get("response") or "").strip()
+        # Strip a single matched pair of wrapping quotes — see
+        # ``_transcribe_gemini`` for why.
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+            text = text[1:-1].strip()
+        log.info("voice: gemma4 transcribe (%d bytes pcm) = %r", len(pcm), text)
+        return text
 
     def _transcribe_gemini(self, pcm: bytes) -> str:
         """Upload the capture as an inline WAV part and ask Gemini for a
