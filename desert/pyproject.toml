@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "desert-voice-agent"
 version = "0.1.0"
-description = "Distributed voice agent POC (orchestrator + worker + frontend)"
+description = "Distributed agents: orchestrator (TUI + API), workers, bootstrap server"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

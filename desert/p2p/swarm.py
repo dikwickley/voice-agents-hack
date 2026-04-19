@@ -75,7 +75,6 @@ class SwarmNode:
         listen_port: int | None = None,
         announce_multiaddr: str | None = None,
         bootstrap_url: str | None = None,
-        seed_addrs: list[str] | None = None,
         topic: str = SWARM_TOPIC,
     ) -> None:
         if role not in _ROLES:
@@ -92,7 +91,6 @@ class SwarmNode:
             else (os.environ.get("DESERT_P2P_ANNOUNCE_ADDR") or "").strip()
         )
         self._bootstrap_url = (bootstrap_url or "").strip() or None
-        self._seed_addrs: list[str] | None = list(seed_addrs) if seed_addrs else None
 
         self.host: IHost | None = None
         self.pubsub: Pubsub | None = None
@@ -205,23 +203,19 @@ class SwarmNode:
 
     async def _run_bootstrap(self, swarm) -> None:
         while True:
-            seeds: list[str] = []
-            if self._seed_addrs:
-                seeds = self._valid_seeds(self._seed_addrs)
-            if not seeds:
-                url = self._bootstrap_url or (os.environ.get("DESERT_BOOTSTRAP_URL") or "").strip()
-                if not url:
-                    log.warning("DESERT_BOOTSTRAP_URL is not set; retry in 2s")
-                    await trio.sleep(2)
-                    continue
-                try:
-                    seeds = self._valid_seeds(
-                        await trio.to_thread.run_sync(lambda: fetch_bootstrap_multiaddrs(url))
-                    )
-                except Exception as e:
-                    log.warning("bootstrap HTTP %s: %s (retry in 2s)", url, e)
-                    await trio.sleep(2)
-                    continue
+            url = self._bootstrap_url or (os.environ.get("DESERT_BOOTSTRAP_URL") or "").strip()
+            if not url:
+                log.warning("DESERT_BOOTSTRAP_URL is not set; retry in 2s")
+                await trio.sleep(2)
+                continue
+            try:
+                seeds = self._valid_seeds(
+                    await trio.to_thread.run_sync(lambda: fetch_bootstrap_multiaddrs(url))
+                )
+            except Exception as e:
+                log.warning("bootstrap HTTP %s: %s (retry in 2s)", url, e)
+                await trio.sleep(2)
+                continue
             if not seeds:
                 log.warning("bootstrap returned no multiaddrs; retry in 2s")
                 await trio.sleep(2)

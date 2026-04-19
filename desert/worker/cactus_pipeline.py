@@ -1,4 +1,4 @@
-"""STT → FunctionGemma + tools → TTS using Cactus Python bindings."""
+"""Cactus local LLM + tools, optional Gemini fallback (google-genai)."""
 
 from __future__ import annotations
 

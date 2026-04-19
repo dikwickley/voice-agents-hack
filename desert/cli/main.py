@@ -88,7 +88,7 @@ def worker_cmd(ctx: typer.Context) -> None:
         datefmt="[%X]",
         handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
     )
-    for noisy in ("httpx", "httpcore", "libp2p", "multiaddr", "zeroconf"):
+    for noisy in ("httpx", "httpcore", "libp2p", "multiaddr"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     from worker.worker import run as worker_run

@@ -29,9 +29,9 @@ async def _run_worker(worker_id: str) -> None:
 
     node = SwarmNode(role="worker", caps=["llm", "tools"], worker_id=worker_id)
     async with trio.open_nursery() as nursery:
-        async def setup(host, _sn: SwarmNode) -> None:
+        async def setup(host, sn: SwarmNode) -> None:
             register_worker_handler(host, runner)
-            log.info("worker %s swarm peer=%s ready", worker_id, _sn.peer_id[:12] + "…")
+            log.info("worker %s swarm peer=%s ready", worker_id, sn.peer_id[:12] + "…")
 
         await node.run(nursery, setup=setup)
 

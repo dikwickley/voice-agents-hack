@@ -85,10 +85,6 @@ class JobStore:
         async with self._lock:
             self._workers[worker_id] = time.monotonic()
 
-    async def forget_worker(self, worker_id: str) -> None:
-        async with self._lock:
-            self._workers.pop(worker_id, None)
-
     async def create_job(
         self,
         challenge: str,
