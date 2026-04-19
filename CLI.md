@@ -5,17 +5,20 @@
 After a one-time setup (see [Prereqs](#prereqs-once)), three terminals from `desert/`:
 
 // # Terminal A — bootstrap (HTTP :8090, libp2p :4001)
+
 ```bash
 uv run desert-bootstrap
 ```
 
 // Terminal B — orchestrator TUI:  
 // uv run python -c "from backend.orchestrator.main import run; run()"
+
 ```bash
 uv run desert orchestrator
 ```
 
 // Terminal C — worker (joins the swarm, serves /desert/task/2.0.0)
+
 ```bash
 uv run desert worker
 ```
@@ -35,40 +38,31 @@ Three processes, one host: **bootstrap**, **worker(s)**, **orchestrator**. They 
 ## Prereqs (once)
 
 1. Python deps for desert:
-
-   ```bash
+  ```bash
    cd desert
    uv sync
-   ```
-
+  ```
 2. Build Cactus shared library + download the default model. The worker uses `libcactus.dylib`/`.so` via `ctypes`, loaded from `desert/cactus/cactus/build/`.
-
-   ```bash
+  ```bash
+   git clone --depth 1 --single-branch --branch main https://github.com/cactus-compute/cactus && cd cactus && source ./setup
    cd desert/cactus
    source ./setup                       # one-time: sets up cactus CLI + venv
    source venv/bin/activate && cactus build --python
    cactus download google/gemma-3-270m-it
-   ```
-
+  ```
    The worker also needs an ASR model; it will be fetched automatically on first request (`openai/whisper-base`) into `desert/cactus/weights/`.
-
 3. (Optional, voice only) PortAudio for mic capture used by the TUI's `/voice` dictation:
-
-   ```bash
+  ```bash
    brew install portaudio      # macOS
    # Ubuntu/Debian: sudo apt install libportaudio2 portaudio19-dev
-   ```
-
+  ```
    `sounddevice` + `numpy` are already declared dependencies, but they need PortAudio at the OS level.
-
 4. (Optional) Drop a `desert/.env` with keys you don't want on the command line:
-
-   ```ini
+  ```ini
    GEMINI_API_KEY=...
    DESERT_CLOUD_FALLBACK=1
    DESERT_GEMINI_MODEL=gemini-3-flash-preview
-   ```
-
+  ```
    All three entrypoints (`cli.main`, `bootstrap_server.main`, `backend.orchestrator.main`) call `dotenv.load_dotenv(desert/.env)` before reading `os.environ`.
 
 ## Run (three terminals)
@@ -137,6 +131,7 @@ The orchestrator TUI (`desert orchestrator`) can transcribe the microphone direc
 4. `/voice off` (or `/voice toggle`) disables voice mode; Ctrl+V becomes a no-op and normal terminal paste shortcuts aren't shadowed.
 
 Tuning knobs:
+
 - `DESERT_VOICE_BACKEND` — force `gemini` or `cactus`. Unset → auto-select.
 - `DESERT_VOICE_GEMINI_MODEL` — override the Gemini audio model (default `gemini-2.5-flash`). Deliberately *not* coupled to `DESERT_GEMINI_MODEL`, because the LLM fallback model (`gemini-3-flash-preview`) tends to generate free-form text on short clips instead of transcribing.
 - `DESERT_ASR_MODEL` — when using the Cactus backend, swap the transcription model. Anything in the [Cactus supported transcription list](https://docs.cactuscompute.com/latest/#supported-transcription-model) works (`nvidia/parakeet-ctc-0.6b`, `openai/whisper-base`, etc.).
@@ -146,34 +141,32 @@ Tuning knobs:
 
 ## Environment
 
-| Variable | Where | Default | Meaning |
-|----------|-------|---------|---------|
-| `DESERT_BOOTSTRAP_URL` | worker, orchestrator | `http://127.0.0.1:8090` | Base URL of the bootstrap HTTP |
-| `DESERT_P2P_LISTEN_PORT` | all | `4001` (bootstrap) / `0` else | TCP port for libp2p (`0` → kernel picks free) |
-| `DESERT_P2P_ANNOUNCE_ADDR` | all | unset | Optional explicit multiaddr to advertise |
-| `BOOTSTRAP_HTTP_HOST` / `BOOTSTRAP_HTTP_PORT` | bootstrap | `0.0.0.0:8090` | HTTP bind |
-| `BOOTSTRAP_INCLUDE_LOOPBACK` | bootstrap | unset | Include `127.0.0.1` / `::1` in `/v1/bootstrap`. **Leave unset**; see Troubleshooting |
-| `ORCH_HOST` / `ORCH_PORT` | orchestrator | `0.0.0.0:8000` | FastAPI bind |
-| `DESERT_LLM_MODEL_ID` | worker | `google/gemma-3-270m-it` | Cactus LLM id |
-| `DESERT_ASR_MODEL` | worker, orchestrator (`/voice` cactus backend) | `openai/whisper-base` | Cactus ASR id |
-| `DESERT_VOICE_BACKEND` | orchestrator (`/voice`) | `gemini` if `GEMINI_API_KEY` else `cactus` | Force `gemini` or `cactus` transcription backend |
-| `DESERT_VOICE_GEMINI_MODEL` | orchestrator (`/voice` gemini backend) | `gemini-2.5-flash` | Gemini audio model used for dictation |
-| `DESERT_LLM_WEIGHTS` | worker | unset | Override LLM weights dir (skip `ensure_model`) |
-| `DESERT_CLOUD_FALLBACK` | worker | `1` | Allow Gemini fallback after local |
-| `GEMINI_API_KEY` | worker | unset | Required for cloud fallback / `force_cloud_fallback` |
-| `DESERT_GEMINI_MODEL` | worker | `gemini-3-flash-preview` | Gemini model id |
-| `DESERT_MOCK` | worker | `0` | `1` → skip Cactus load; return canned replies (p2p-only tests) |
+
+| Variable                                      | Where                                          | Default                                    | Meaning                                                                              |
+| --------------------------------------------- | ---------------------------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------ |
+| `DESERT_BOOTSTRAP_URL`                        | worker, orchestrator                           | `http://127.0.0.1:8090`                    | Base URL of the bootstrap HTTP                                                       |
+| `DESERT_P2P_LISTEN_PORT`                      | all                                            | `4001` (bootstrap) / `0` else              | TCP port for libp2p (`0` → kernel picks free)                                        |
+| `DESERT_P2P_ANNOUNCE_ADDR`                    | all                                            | unset                                      | Optional explicit multiaddr to advertise                                             |
+| `BOOTSTRAP_HTTP_HOST` / `BOOTSTRAP_HTTP_PORT` | bootstrap                                      | `0.0.0.0:8090`                             | HTTP bind                                                                            |
+| `BOOTSTRAP_INCLUDE_LOOPBACK`                  | bootstrap                                      | unset                                      | Include `127.0.0.1` / `::1` in `/v1/bootstrap`. **Leave unset**; see Troubleshooting |
+| `ORCH_HOST` / `ORCH_PORT`                     | orchestrator                                   | `0.0.0.0:8000`                             | FastAPI bind                                                                         |
+| `DESERT_LLM_MODEL_ID`                         | worker                                         | `google/gemma-3-270m-it`                   | Cactus LLM id                                                                        |
+| `DESERT_ASR_MODEL`                            | worker, orchestrator (`/voice` cactus backend) | `openai/whisper-base`                      | Cactus ASR id                                                                        |
+| `DESERT_VOICE_BACKEND`                        | orchestrator (`/voice`)                        | `gemini` if `GEMINI_API_KEY` else `cactus` | Force `gemini` or `cactus` transcription backend                                     |
+| `DESERT_VOICE_GEMINI_MODEL`                   | orchestrator (`/voice` gemini backend)         | `gemini-2.5-flash`                         | Gemini audio model used for dictation                                                |
+| `DESERT_LLM_WEIGHTS`                          | worker                                         | unset                                      | Override LLM weights dir (skip `ensure_model`)                                       |
+| `DESERT_CLOUD_FALLBACK`                       | worker                                         | `1`                                        | Allow Gemini fallback after local                                                    |
+| `GEMINI_API_KEY`                              | worker                                         | unset                                      | Required for cloud fallback / `force_cloud_fallback`                                 |
+| `DESERT_GEMINI_MODEL`                         | worker                                         | `gemini-3-flash-preview`                   | Gemini model id                                                                      |
+| `DESERT_MOCK`                                 | worker                                         | `0`                                        | `1` → skip Cactus load; return canned replies (p2p-only tests)                       |
+
 
 ## Troubleshooting
 
 - **Orchestrator shows `workers: []` forever** — almost always means the GossipSub mesh didn't form. The usual cause: `/v1/bootstrap` returned more than one seed address and libp2p (0.6.0) raced two concurrent `/meshsub/1.0.0` stream handshakes over the same peer, one of which gets dropped with `MultiselectClient handshake: read failed`. Fix: leave `BOOTSTRAP_INCLUDE_LOOPBACK` unset and don't set `DESERT_P2P_ANNOUNCE_ADDR` on the bootstrap — the default filter returns exactly one non-loopback multiaddr (your LAN IP), which every process on the same Mac can dial.
+- `**/v1/bootstrap` returns 503 "no dialable (non-loopback) multiaddrs"** — the host has no non-loopback IPv4 interface. Either bring up Wi-Fi / Ethernet, or set `BOOTSTRAP_INCLUDE_LOOPBACK=1` **and** be aware of the race above (may require restarting clients until the mesh settles).
+- `**❌ No IPv4+TCP addresses for <peer>`** — cosmetic log from libp2p when it skips an IPv6-only seed. Safe to ignore.
+- `**job failed: force cloud failed: set GEMINI_API_KEY**` — the worker doesn't have the key in `os.environ`. Make sure `desert/.env` sets `GEMINI_API_KEY=...`; every entrypoint auto-loads that file. If you run the worker from somewhere else, point at it explicitly: `uv run --env-file /path/to/.env desert worker`.
+- `**Cactus library not found at .../libcactus.dylib**` on the worker — run `cactus build --python` in `desert/cactus/`.
+- `**LLM weights not found**` on the worker — run `cactus download google/gemma-3-270m-it` (or whatever `DESERT_LLM_MODEL_ID` points to).
 
-- **`/v1/bootstrap` returns 503 "no dialable (non-loopback) multiaddrs"** — the host has no non-loopback IPv4 interface. Either bring up Wi-Fi / Ethernet, or set `BOOTSTRAP_INCLUDE_LOOPBACK=1` **and** be aware of the race above (may require restarting clients until the mesh settles).
-
-- **`❌ No IPv4+TCP addresses for <peer>`** — cosmetic log from libp2p when it skips an IPv6-only seed. Safe to ignore.
-
-- **`job failed: force cloud failed: set GEMINI_API_KEY`** — the worker doesn't have the key in `os.environ`. Make sure `desert/.env` sets `GEMINI_API_KEY=...`; every entrypoint auto-loads that file. If you run the worker from somewhere else, point at it explicitly: `uv run --env-file /path/to/.env desert worker`.
-
-- **`Cactus library not found at .../libcactus.dylib`** on the worker — run `cactus build --python` in `desert/cactus/`.
-
-- **`LLM weights not found`** on the worker — run `cactus download google/gemma-3-270m-it` (or whatever `DESERT_LLM_MODEL_ID` points to).
