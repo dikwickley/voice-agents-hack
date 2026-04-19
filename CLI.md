@@ -48,9 +48,9 @@ Three processes, one host: **bootstrap**, **worker(s)**, **orchestrator**. They 
    cd desert/cactus
    source ./setup                       # one-time: sets up cactus CLI + venv
    source venv/bin/activate && cactus build --python
-   cactus download google/gemma-3-270m-it
+   cactus download google/gemma-4-E2B-it
   ```
-   The worker also needs an ASR model; it will be fetched automatically on first request (`openai/whisper-base`) into `desert/cactus/weights/`.
+   `google/gemma-4-E2B-it` is the default LLM for both the worker and the orchestrator TUI's `/voice` dictation (it's natively multimodal: text + audio). The ASR fallback model (`openai/whisper-base`) is fetched automatically on first request into `desert/cactus/weights/`. If you want to run something smaller, set `DESERT_LLM_MODEL_ID=google/gemma-3-270m-it` (or any other Cactus-supported id) in `desert/.env` and download that instead.
 3. (Optional, voice only) PortAudio for mic capture used by the TUI's `/voice` dictation:
   ```bash
    brew install portaudio      # macOS
@@ -154,7 +154,7 @@ Tuning knobs:
 | `BOOTSTRAP_HTTP_HOST` / `BOOTSTRAP_HTTP_PORT` | bootstrap                                      | `0.0.0.0:8090`                             | HTTP bind                                                                            |
 | `BOOTSTRAP_INCLUDE_LOOPBACK`                  | bootstrap                                      | unset                                      | Include `127.0.0.1` / `::1` in `/v1/bootstrap`. **Leave unset**; see Troubleshooting |
 | `ORCH_HOST` / `ORCH_PORT`                     | orchestrator                                   | `0.0.0.0:8000`                             | FastAPI bind                                                                         |
-| `DESERT_LLM_MODEL_ID`                         | worker                                         | `google/gemma-3-270m-it`                   | Cactus LLM id                                                                        |
+| `DESERT_LLM_MODEL_ID`                         | worker                                         | `google/gemma-4-E2B-it`                    | Cactus LLM id (shared with `/voice` gemma4 backend)                                  |
 | `DESERT_ASR_MODEL`                            | worker, orchestrator (`/voice` cactus backend) | `openai/whisper-base`                      | Cactus ASR id                                                                        |
 | `DESERT_VOICE_BACKEND`                        | orchestrator (`/voice`)                        | `gemma4` if weights present · `gemini` if `GEMINI_API_KEY` · else `cactus` | Force `gemma4`, `gemini`, or `cactus` transcription backend                          |
 | `DESERT_GEMMA4_MODEL`                         | orchestrator (`/voice` gemma4 backend)         | `google/gemma-4-E2B-it`                    | Cactus model id used for Gemma 4 auto-download                                       |
@@ -174,5 +174,5 @@ Tuning knobs:
 - `**❌ No IPv4+TCP addresses for <peer>`** — cosmetic log from libp2p when it skips an IPv6-only seed. Safe to ignore.
 - `**job failed: force cloud failed: set GEMINI_API_KEY**` — the worker doesn't have the key in `os.environ`. Make sure `desert/.env` sets `GEMINI_API_KEY=...`; every entrypoint auto-loads that file. If you run the worker from somewhere else, point at it explicitly: `uv run --env-file /path/to/.env desert worker`.
 - `**Cactus library not found at .../libcactus.dylib**` on the worker — run `cactus build --python` in `desert/cactus/`.
-- `**LLM weights not found**` on the worker — run `cactus download google/gemma-3-270m-it` (or whatever `DESERT_LLM_MODEL_ID` points to).
+- `**LLM weights not found**` on the worker — run `cactus download google/gemma-4-E2B-it` from `desert/cactus/` (or whatever `DESERT_LLM_MODEL_ID` points to). Weights land in `desert/cactus/weights/`.
 

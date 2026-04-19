@@ -102,13 +102,20 @@ def _repo_cactus_root() -> Path:
 
 
 def _resolve_llm_weights() -> Path:
-    """Match ``examples/main.py``: ``ensure_model(MODEL_ID)`` or explicit ``DESERT_LLM_WEIGHTS``."""
+    """Match ``examples/main.py``: ``ensure_model(MODEL_ID)`` or explicit ``DESERT_LLM_WEIGHTS``.
+
+    Default is ``google/gemma-4-E2B-it`` — the same natively-multimodal
+    model the orchestrator TUI uses for ``/voice`` dictation, so the worker
+    and orchestrator mmap the same weight files on a shared host (Cactus'
+    mmap means the ~2 GB footprint is counted once at the OS level even
+    though two processes hold handles).
+    """
     env = os.environ.get("DESERT_LLM_WEIGHTS")
     if env:
         return Path(env)
     from src.downloads import ensure_model
 
-    model_id = os.environ.get("DESERT_LLM_MODEL_ID", "google/gemma-3-270m-it")
+    model_id = os.environ.get("DESERT_LLM_MODEL_ID", "google/gemma-4-E2B-it")
     return ensure_model(model_id)
 
 
