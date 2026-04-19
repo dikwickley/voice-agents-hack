@@ -8,9 +8,27 @@ import json
 import logging
 import os
 import shutil
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+
+def _ensure_cactus_python_on_path() -> None:
+    """Make ``from src.cactus / src.downloads import ...`` work without requiring
+    the caller to export PYTHONPATH. The Cactus FFI package lives in
+    ``desert/cactus/python`` alongside the libcactus shared library; we add it
+    to ``sys.path`` at import time so every worker process can load it.
+    """
+    candidate = Path(__file__).resolve().parent.parent / "cactus" / "python"
+    if candidate.is_dir():
+        p = str(candidate)
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
+_ensure_cactus_python_on_path()
+
 
 log = logging.getLogger(__name__)
 

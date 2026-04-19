@@ -19,6 +19,7 @@ dependencies = [
     "libp2p>=0.3",
     "textual>=8.2.3",
     "typer>=0.24.1",
+    "python-dotenv>=1.0",
 ]
 
 [project.scripts]

@@ -7,6 +7,13 @@ import os
 import pathlib
 import sys
 
+from dotenv import load_dotenv
+
+# Load desert/.env before any downstream module reads os.environ, so things like
+# GEMINI_API_KEY / DESERT_BOOTSTRAP_URL set there are picked up by uv run with
+# no extra flags.
+load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env")
+
 import typer
 from rich.logging import RichHandler
 

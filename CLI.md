@@ -1,105 +1,144 @@
-# Desert — two images (localhost first)
+# Desert — native run (uv)
 
-1. **`desert-bootstrap`** — libp2p peer + HTTP `GET /v1/bootstrap` (dialable multiaddrs).
-2. **`desert`** — worker (default) or orchestrator (TUI). Set **`DESERT_BOOTSTRAP_URL`** to the bootstrap HTTP base URL.
+## Quickstart
 
-There is no mDNS: the bootstrap server is the rendezvous.
-
-## Why bootstrap must not advertise `127.0.0.1` to other containers
-
-`GET /v1/bootstrap` **drops loopback** multiaddrs by default. Inside a container, `127.0.0.1` is that container, not the host or another container—workers would dial themselves and Noise would fail. For processes on the **same machine without Docker**, set **`BOOTSTRAP_INCLUDE_LOOPBACK=1`** on the bootstrap container.
-
-## Build
-
-From repo root:
+After a one-time setup (see [Prereqs](#prereqs-once)), three terminals from `desert/`:
 
 ```bash
-docker build -f desert/docker/Dockerfile.bootstrap -t desert-bootstrap:latest .
-docker build -f desert/docker/Dockerfile.desert -t desert:latest .
+# Terminal A — bootstrap (HTTP :8090, libp2p :4001)
+uv run desert-bootstrap
+
+# Terminal B — orchestrator TUI:  
+uv run desert orchestrator
+# uv run python -c "from backend.orchestrator.main import run; run()"
+
+# Terminal C — worker (joins the swarm, serves /desert/task/2.0.0)
+uv run desert worker
 ```
 
-### Bake `GEMINI_API_KEY` into `desert` (recommended)
-
-Defaults in the image: **local `google/gemma-3-270m-it`**, **`DESERT_CLOUD_FALLBACK=1`**, **`DESERT_GEMINI_MODEL=gemini-3-flash-preview`**. You usually only need to pass the API key and keep the rest implicit.
+Smoke test:
 
 ```bash
-# From repo root (inline key — be careful on shared machines).
-docker build -f desert/docker/Dockerfile.desert -t desert:latest \
-  --build-arg GEMINI_API_KEY="YOUR_GEMINI_API_KEY" \
-  .
-
-# Or read from desert/.env (line: GEMINI_API_KEY=...)
-export GEMINI_API_KEY="$(grep -E '^GEMINI_API_KEY=' desert/.env | cut -d= -f2-)"
-docker build -f desert/docker/Dockerfile.desert -t desert:latest \
-  --build-arg GEMINI_API_KEY="${GEMINI_API_KEY}" \
-  .
+curl -s http://127.0.0.1:8000/v1/workers | python3 -m json.tool
 ```
 
-Optional: `--build-arg BAKE_LLM_MODEL_ID=google/gemma-3-270m-it`, `--build-arg DESERT_CLOUD_FALLBACK=1`, `--build-arg DESERT_GEMINI_MODEL=...` to override. At run time: `-e GEMINI_API_KEY=...` still works.
+`desert/.env` is auto-loaded by every entrypoint, so `GEMINI_API_KEY`, `DESERT_CLOUD_FALLBACK`, etc. flow through with no `--env-file` / no `export`. The worker adds `cactus/python` to `sys.path` on import — no `PYTHONPATH` needed. The bootstrap pins libp2p `:4001` and clients default `DESERT_BOOTSTRAP_URL` to `http://127.0.0.1:8090`, so a same-host loop needs **zero** environment overrides on the command line.
 
-## Docker: bootstrap + workers (typical)
+---
 
-**Terminal A — bootstrap** (published P2P + HTTP; loopback stripped from `/v1/bootstrap` so clients get the container LAN address, e.g. `172.17.x.x`)
+Three processes, one host: **bootstrap**, **worker(s)**, **orchestrator**. They meet via the bootstrap's HTTP `GET /v1/bootstrap` endpoint (returns dialable libp2p multiaddrs) and then talk over a shared GossipSub topic (`desert/swarm/v1`). There is no mDNS.
+
+## Prereqs (once)
+
+1. Python deps for desert:
+
+   ```bash
+   cd desert
+   uv sync
+   ```
+
+2. Build Cactus shared library + download the default model. The worker uses `libcactus.dylib`/`.so` via `ctypes`, loaded from `desert/cactus/cactus/build/`.
+
+   ```bash
+   cd desert/cactus
+   source ./setup                       # one-time: sets up cactus CLI + venv
+   source venv/bin/activate && cactus build --python
+   cactus download google/gemma-3-270m-it
+   ```
+
+   The worker also needs an ASR model; it will be fetched automatically on first request (`openai/whisper-tiny`) into `desert/cactus/weights/`.
+
+3. (Optional) Drop a `desert/.env` with keys you don't want on the command line:
+
+   ```ini
+   GEMINI_API_KEY=...
+   DESERT_CLOUD_FALLBACK=1
+   DESERT_GEMINI_MODEL=gemini-3-flash-preview
+   ```
+
+   All three entrypoints (`cli.main`, `bootstrap_server.main`, `backend.orchestrator.main`) call `dotenv.load_dotenv(desert/.env)` before reading `os.environ`.
+
+## Run (three terminals)
+
+All commands run from `desert/`. Each line below shows the **minimum** you need; every flag is optional.
+
+**Terminal A — bootstrap**
 
 ```bash
-docker run --rm -p 8090:8090 -p 4001:4001 desert-bootstrap:latest
+uv run desert-bootstrap
 ```
 
-**Terminal B — worker(s)**
+Binds HTTP on `:8090` and libp2p on `:4001` by default. `GET /v1/bootstrap` returns the host's LAN multiaddr (loopback is stripped by default; see Troubleshooting).
+
+**Terminal B — orchestrator API**
 
 ```bash
-docker run --rm \
-  -e DESERT_BOOTSTRAP_URL=http://host.docker.internal:8090 \
-  desert:latest
+uv run python -c "from backend.orchestrator.main import run; run()"
 ```
 
-**Terminal C — orchestrator**
+Or with the full TUI:
 
 ```bash
-docker run --rm -it -p 8000:8000 \
-  -e DESERT_MODE=orchestrator \
-  -e DESERT_BOOTSTRAP_URL=http://host.docker.internal:8090 \
-  desert:latest
+uv run desert orchestrator
 ```
 
-On Linux, add `--add-host=host.docker.internal:host-gateway` to **worker and orchestrator** if `host.docker.internal` is missing, or use `http://172.17.0.1:8090` for the HTTP URL only (bootstrap API must still return P2P addrs your network can reach—usually the bootstrap container’s `172.17.x.x` from `docker inspect`).
+Defaults to `http://0.0.0.0:8000`. Override with `ORCH_HOST` / `ORCH_PORT` env vars if needed.
 
-If you **must** advertise a hostname for P2P (e.g. host gateway), run bootstrap with:
+**Terminal C — worker**
 
 ```bash
-docker run --rm -p 8090:8090 -p 4001:4001 \
-  -e DESERT_P2P_ANNOUNCE_ADDR=/dns4/host.docker.internal/tcp/4001 \
-  desert-bootstrap:latest
+uv run desert worker
 ```
+
+Every invocation gets its own random libp2p port (`find_free_port()`), so you can run several workers back-to-back without port collisions. Add `--worker-id <name>` to make them easier to tell apart in `/v1/workers`.
+
+## Smoke test via the orchestrator API
+
+```bash
+# Is the orchestrator up and has it seen the worker?
+curl -s http://127.0.0.1:8000/health
+curl -s http://127.0.0.1:8000/v1/workers
+
+# Submit a one-shot job
+JID=$(curl -s -X POST http://127.0.0.1:8000/v1/jobs \
+  -H 'content-type: application/json' \
+  -d '{"challenge":"Say hello in one sentence.","parallel":1}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
+
+# Poll until done
+curl -s http://127.0.0.1:8000/v1/jobs/$JID | python3 -m json.tool
+```
+
+On the first job the worker blocks briefly while loading ASR + LLM weights; subsequent jobs are hot. `inference_source` is `local` for on-device Cactus output and `gemini` when the cloud fallback kicks in (set `force_cloud_fallback: true` in the request body to force it).
 
 ## Environment
 
-| Variable | Where | Meaning |
-|----------|--------|---------|
-| `DESERT_BOOTSTRAP_URL` | desert | Base URL of bootstrap HTTP (e.g. `http://host.docker.internal:8090`) |
-| `DESERT_P2P_ANNOUNCE_ADDR` | libp2p peers | Optional; multiaddr **others** use to dial this node |
-| `DESERT_P2P_LISTEN_PORT` | all | TCP listen port (default `4001`) |
-| `BOOTSTRAP_HTTP_PORT` | bootstrap | HTTP port (default `8090`) |
-| `BOOTSTRAP_INCLUDE_LOOPBACK` | bootstrap | Set `1` only for native dev (all processes on host); never for cross-container |
-
-## Without Docker
-
-Terminal 1:
-
-```bash
-cd desert && uv sync
-BOOTSTRAP_INCLUDE_LOOPBACK=1 DESERT_P2P_ANNOUNCE_ADDR=/ip4/127.0.0.1/tcp/4001 uv run desert-bootstrap
-```
-
-Terminal 2 / 3:
-
-```bash
-DESERT_BOOTSTRAP_URL=http://127.0.0.1:8090 uv run desert worker
-DESERT_BOOTSTRAP_URL=http://127.0.0.1:8090 uv run desert orchestrator
-```
+| Variable | Where | Default | Meaning |
+|----------|-------|---------|---------|
+| `DESERT_BOOTSTRAP_URL` | worker, orchestrator | `http://127.0.0.1:8090` | Base URL of the bootstrap HTTP |
+| `DESERT_P2P_LISTEN_PORT` | all | `4001` (bootstrap) / `0` else | TCP port for libp2p (`0` → kernel picks free) |
+| `DESERT_P2P_ANNOUNCE_ADDR` | all | unset | Optional explicit multiaddr to advertise |
+| `BOOTSTRAP_HTTP_HOST` / `BOOTSTRAP_HTTP_PORT` | bootstrap | `0.0.0.0:8090` | HTTP bind |
+| `BOOTSTRAP_INCLUDE_LOOPBACK` | bootstrap | unset | Include `127.0.0.1` / `::1` in `/v1/bootstrap`. **Leave unset**; see Troubleshooting |
+| `ORCH_HOST` / `ORCH_PORT` | orchestrator | `0.0.0.0:8000` | FastAPI bind |
+| `DESERT_LLM_MODEL_ID` | worker | `google/gemma-3-270m-it` | Cactus LLM id |
+| `DESERT_ASR_MODEL` | worker | `openai/whisper-tiny` | Cactus ASR id |
+| `DESERT_LLM_WEIGHTS` | worker | unset | Override LLM weights dir (skip `ensure_model`) |
+| `DESERT_CLOUD_FALLBACK` | worker | `1` | Allow Gemini fallback after local |
+| `GEMINI_API_KEY` | worker | unset | Required for cloud fallback / `force_cloud_fallback` |
+| `DESERT_GEMINI_MODEL` | worker | `gemini-3-flash-preview` | Gemini model id |
+| `DESERT_MOCK` | worker | `0` | `1` → skip Cactus load; return canned replies (p2p-only tests) |
 
 ## Troubleshooting
 
-- **Noise / handshake / `127.0.0.1` in errors** — do not publish loopback to other containers; use default bootstrap image (filters loopback) or fix `DESERT_P2P_ANNOUNCE_ADDR`.
-- **`503` on `/v1/bootstrap`** — no non-loopback addrs; run bootstrap in Docker without `127.0.0.1` announce, or set `BOOTSTRAP_INCLUDE_LOOPBACK=1` for native-only.
-- **`DESERT_BOOTSTRAP_URL` unset** — set it on every desert container.
+- **Orchestrator shows `workers: []` forever** — almost always means the GossipSub mesh didn't form. The usual cause: `/v1/bootstrap` returned more than one seed address and libp2p (0.6.0) raced two concurrent `/meshsub/1.0.0` stream handshakes over the same peer, one of which gets dropped with `MultiselectClient handshake: read failed`. Fix: leave `BOOTSTRAP_INCLUDE_LOOPBACK` unset and don't set `DESERT_P2P_ANNOUNCE_ADDR` on the bootstrap — the default filter returns exactly one non-loopback multiaddr (your LAN IP), which every process on the same Mac can dial.
+
+- **`/v1/bootstrap` returns 503 "no dialable (non-loopback) multiaddrs"** — the host has no non-loopback IPv4 interface. Either bring up Wi-Fi / Ethernet, or set `BOOTSTRAP_INCLUDE_LOOPBACK=1` **and** be aware of the race above (may require restarting clients until the mesh settles).
+
+- **`❌ No IPv4+TCP addresses for <peer>`** — cosmetic log from libp2p when it skips an IPv6-only seed. Safe to ignore.
+
+- **`job failed: force cloud failed: set GEMINI_API_KEY`** — the worker doesn't have the key in `os.environ`. Make sure `desert/.env` sets `GEMINI_API_KEY=...`; every entrypoint auto-loads that file. If you run the worker from somewhere else, point at it explicitly: `uv run --env-file /path/to/.env desert worker`.
+
+- **`Cactus library not found at .../libcactus.dylib`** on the worker — run `cactus build --python` in `desert/cactus/`.
+
+- **`LLM weights not found`** on the worker — run `cactus download google/gemma-3-270m-it` (or whatever `DESERT_LLM_MODEL_ID` points to).

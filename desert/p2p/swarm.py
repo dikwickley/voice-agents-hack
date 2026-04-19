@@ -52,6 +52,12 @@ GS_DEGREE_HIGH = 12
 
 _ROLES = frozenset({"orchestrator", "worker", "bootstrap"})
 
+# Sensible local-dev defaults so single-host runs work with zero configuration.
+# The bootstrap peer pins :4001 so its HTTP endpoint can hand out a stable
+# multiaddr; other roles default to :0 (kernel-picked free port).
+_DEFAULT_LISTEN_PORT_BY_ROLE: dict[str, int] = {"bootstrap": 4001}
+DEFAULT_BOOTSTRAP_URL = "http://127.0.0.1:8090"
+
 
 @dataclass
 class PeerRecord:
@@ -84,7 +90,8 @@ class SwarmNode:
         self.worker_id = worker_id
         self.topic = topic
         env_port = os.environ.get("DESERT_P2P_LISTEN_PORT")
-        self.listen_port: int = listen_port or (int(env_port) if env_port else 0)
+        role_default = _DEFAULT_LISTEN_PORT_BY_ROLE.get(role, 0)
+        self.listen_port: int = listen_port or (int(env_port) if env_port else role_default)
         self.announce_multiaddr = (
             announce_multiaddr
             if announce_multiaddr is not None
@@ -203,7 +210,11 @@ class SwarmNode:
 
     async def _run_bootstrap(self, swarm) -> None:
         while True:
-            url = self._bootstrap_url or (os.environ.get("DESERT_BOOTSTRAP_URL") or "").strip()
+            url = (
+                self._bootstrap_url
+                or (os.environ.get("DESERT_BOOTSTRAP_URL") or "").strip()
+                or DEFAULT_BOOTSTRAP_URL
+            )
             if not url:
                 log.warning("DESERT_BOOTSTRAP_URL is not set; retry in 2s")
                 await trio.sleep(2)
